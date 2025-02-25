@@ -102,15 +102,14 @@ end;
 
 function runLNA(rn::ReactionSystem, ics, params, volume, tEnd, numSteps)
 
-    tSpan = (0.0, tEnd); ## set up time span
-
     ## set up and solve LNA problem from LinearNoiseApproximation.jl package
     lna = LNASystem(rn)
     lnaDEs = lna.odesys; ## only want ODEs to turn into a SS problem
     
-    initGuesses = zeros(2*length(rn.species)+binomial(length(rn.species),2));
-    initGuesses[1:length(rn.species)] = ics;
-    ssProb = SteadyStateProblem(lnaDEs, initGuesses/volume, [rn.ps[i] => params[i] for i in 1:length(rn.ps)]);
+    initGuesses = zeros(2*length(rn.species)+binomial(length(rn.species),2)); ## guesses for species+variances+covariances
+    initGuesses[1:length(rn.species)] = ics; ## first N variables are species
+
+    ssProb = SteadyStateProblem(lnaDEs, initGuesses/volume, [rn.ps[i] => params[i] for i in 1:length(rn.ps)]); ## convert DEs to a steady state problem
 
     sol = solve(ssProb, DynamicSS(tspan=1000))
 
@@ -237,7 +236,7 @@ end;
 
 
 
-function getRealizedVector(rn::ReactionSystem, params, meanIdxs, varIdxs, LNAsol, volume, conservationLaws = nothing)
+function getRealizedVector(rn::ReactionSystem, ics, params, meanIdxs, varIdxs, LNAsol, volume)
 
     SS = zeros(length(rn.species)) ## initialize vector for deterministic steady states
     for species in rn.species ## for each species
@@ -247,11 +246,21 @@ function getRealizedVector(rn::ReactionSystem, params, meanIdxs, varIdxs, LNAsol
 
     deltaVec = buildDeltaVect(rn, params, meanIdxs, varIdxs, LNAsol) ## get delta vector with adjustments
 
-    if conservationLaws != nothing ## if there's conservation conservationLaws
-        reducedSpecies, reducedSystem = buildNewDESystem(rn, conservationLaws) ## get the reduced system
+    conservationEqs = conservedequations(rn) ## get conservation laws
+
+    if length(conservationEqs) > 0 ## if there are conservation laws
         
-        invJac = getInvJac(rn, params, meanIdxs, LNAsol, reducedSpecies, reducedSystem) ## get the inverse Jacobian of reduced system
+        conservationConstants = conservationlaw_constants(rn)
         
+        icDict = Dict([rn.species[i]=>ics[i]/volume for i in 1:length(rn.species)])
+        conservationConstants = substitute(conservationConstants, icDict)
+        
+        constDict = Dict([conservationConstants[i].lhs => conservationConstants[i].rhs for i in 1:length(conservationEqs)])
+        conservationEqs = substitute(conservationEqs, constDict)
+        
+        reducedSpecies, reducedSystem = buildNewDESystem(rn, conservationEqs) ## get the reduced system
+        invJac = getInvJac(rn, params, meanIdxs, LNAsol, reducedSpecies, reducedSystem);
+
         deltaVecReduced = [deltaVec[findfirst(x->isequal(x, species), rn.species)] for species in reducedSpecies] ## get the delta vector entries for only the remaining species
    
         realizedSS = zeros(length(rn.species)) ## initialize vector to hold realized S.S.
@@ -264,7 +273,7 @@ function getRealizedVector(rn::ReactionSystem, params, meanIdxs, varIdxs, LNAsol
             i += 1
         end
 
-        for law in conservationLaws ## for each conservation law
+        for law in conservationEqs ## for each conservation law
             speciesToCompute = findfirst(x->isequal(x, law.lhs), rn.species) ## check what species it is for
             realizedSS[speciesToCompute] = substitute(law.rhs, subDict) ## find the realized S.S. by subbing independent species' S.S. in
         end
@@ -272,11 +281,9 @@ function getRealizedVector(rn::ReactionSystem, params, meanIdxs, varIdxs, LNAsol
     else ## getting Jacobian and realized vector normally
         invJac = getInvJac(rn, params, meanIdxs, LNAsol) ## get inverse Jacobian
         realizedSS = SS - (1/volume)*invJac*deltaVec ## Eq. 26 from 2009 paper
-    end
-    
+    end;  
     return SS, realizedSS
 end;
-
 
 
 
@@ -311,14 +318,14 @@ end;
 
 
 
-function EMRE(rn::ReactionSystem, ics, params, volume, tEnd, numSteps, numTrajs, conservationLaws = nothing)
+function EMRE(rn::ReactionSystem, ics, params, volume, tEnd, numSteps, numTrajs)
 
     LNAparams, SSAparams = setParams(rn, params, volume)
     
     timePoints, SSAmeans = runSSA(rn, ics, SSAparams, volume, tEnd, numSteps, numTrajs)
     meanIdxs, varIdxs, LNAsol = runLNA(rn, ics, LNAparams, volume, tEnd, numSteps)
     
-    SS, realizedSS = getRealizedVector(rn, LNAparams, meanIdxs, varIdxs, LNAsol, volume, conservationLaws)
+    SS, realizedSS = getRealizedVector(rn, ics, LNAparams, meanIdxs, varIdxs, LNAsol, volume)
     
     return timePoints, SSAmeans, SS, realizedSS
  end;
